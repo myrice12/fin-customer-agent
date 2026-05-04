@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Financial Customer Service Agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="page-glow page-glow-a"></div>
+    <div class="page-glow page-glow-b"></div>
+
+    <main class="shell">
+      <aside class="sidebar" aria-label="导航">
+        <div class="brand reveal">
+          <div class="brand-mark">FA</div>
+          <div>
+            <p class="eyebrow">Financial Service Desk</p>
+            <h1>Customer Service Agent</h1>
+          </div>
+        </div>
+
+        <section class="sidebar-panel reveal delay-1">
+          <div class="section-head">
+            <span>Service status</span>
+          </div>
+          <dl class="status-list">
+            <div>
+              <dt>Service</dt>
+              <dd id="healthText">Checking</dd>
+            </div>
+            <div>
+              <dt>Thread</dt>
+              <dd id="sessionText">New thread</dd>
+            </div>
+            <div>
+              <dt>Intent</dt>
+              <dd id="intentText">Pending</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="sidebar-panel reveal delay-2">
+          <div class="section-head">
+            <span>Quick prompts</span>
+          </div>
+          <div class="prompt-list">
+            <button type="button" class="prompt-chip" data-prompt="退款政策是什么？">退款政策</button>
+            <button type="button" class="prompt-chip" data-prompt="理财产品A的收益率是多少？">产品咨询</button>
+            <button type="button" class="prompt-chip" data-prompt="我想创建一个退款工单">创建工单</button>
+            <button type="button" class="prompt-chip" data-prompt="开户流程需要准备什么？">开户流程</button>
+          </div>
+        </section>
+
+        <section class="sidebar-panel reveal delay-2">
+          <div class="section-head">
+            <span>Access</span>
+          </div>
+          <nav class="mini-links">
+            <a href="/docs" target="_blank" rel="noreferrer">API Docs</a>
+            <a href="/api/tools" target="_blank" rel="noreferrer">Tool Schema</a>
+            <a href="/api/metrics" target="_blank" rel="noreferrer">Metrics</a>
+          </nav>
+        </section>
+      </aside>
+
+      <section class="workspace" aria-label="对话工作区">
+        <header class="hero reveal">
+          <div class="hero-copy">
+            <p class="eyebrow">Supervisor orchestrated workflow</p>
+            <h2>金融客服对话台</h2>
+            <p class="hero-text">
+              统一处理产品咨询、退款说明、开户流程和工单请求，自动完成路由、知识检索与合规检查。
+            </p>
+          </div>
+
+          <div class="hero-metrics">
+            <div class="metric-tile">
+              <span>Compliance</span>
+              <strong id="complianceBadge">Idle</strong>
+            </div>
+            <div class="metric-tile">
+              <span>Latency</span>
+              <strong id="latencyText">--</strong>
+            </div>
+            <div class="metric-tile">
+              <span>Messages</span>
+              <strong id="messageCountText">1 msg</strong>
+            </div>
+            <div class="metric-tile">
+              <span>Tools</span>
+              <strong id="toolCountText">--</strong>
+            </div>
+          </div>
+        </header>
+
+        <section class="conversation reveal delay-1">
+          <div class="conversation-head">
+            <div>
+              <p class="eyebrow">Live conversation</p>
+              <h3>Session stream</h3>
+            </div>
+            <div class="result-badge" id="resultText">Ready</div>
+          </div>
+
+          <div class="chat-log" id="chatLog" aria-live="polite">
+            <article class="message assistant">
+              <div class="message-mark">AG</div>
+              <div class="message-body">
+                <div class="message-meta">
+                  <span>Assistant</span>
+                  <span>Processed</span>
+                </div>
+                <p>你好，我可以处理退款、产品咨询、开户问答和工单请求。直接输入问题即可。</p>
+              </div>
+            </article>
+          </div>
+
+          <div class="footer-strip">
+            <div class="strip-label">Tool registry</div>
+            <div class="tool-strip" id="toolList">
+              <span class="tool-pill">Loading tools...</span>
+            </div>
+          </div>
+
+          <form class="composer" id="chatForm">
+            <label class="sr-only" for="messageInput">输入消息</label>
+            <textarea
+              id="messageInput"
+              rows="1"
+              placeholder="输入客户问题，例如：退款政策是什么？"
+            ></textarea>
+            <button type="submit" id="sendButton" aria-label="发送消息">
+              <span>Send</span>
+            </button>
+          </form>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
