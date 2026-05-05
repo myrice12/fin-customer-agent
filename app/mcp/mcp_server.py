@@ -7,9 +7,12 @@ MCP工具协议服务端 — Model Context Protocol实现
 from __future__ import annotations
 
 import json
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Awaitable
 from datetime import datetime
+
+from app.harness.sandbox import ToolSandbox
 
 
 @dataclass
@@ -52,7 +55,8 @@ class MCPToolServer:
 
     def __init__(self):
         self._tools: dict[str, ToolDefinition] = {}
-        self._call_log: list[ToolCallResult] = []
+        self._call_log: deque[ToolCallResult] = deque(maxlen=1000)
+        self._sandbox = ToolSandbox()
 
     def register_tool(self, tool: ToolDefinition) -> None:
         """注册一个MCP工具"""
@@ -97,43 +101,38 @@ class MCPToolServer:
             })
         return tools
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolCallResult:
+    async def call_tool(self, name: str, arguments: dict[str, Any],
+                        caller: dict | None = None) -> ToolCallResult:
         """
-        工具调用：执行指定工具。
+        工具调用：通过沙箱执行指定工具。
         对应MCP的 tools/call 方法。
         """
-        import time
-
         tool = self._tools.get(name)
         if tool is None:
             result = ToolCallResult(
                 tool_name=name,
                 success=False,
-                error=f"Tool '{name}' not found. Available: {list(self._tools.keys())}",
+                error=f"Tool '{name}' not found",
             )
             self._call_log.append(result)
             return result
 
-        start = time.time()
-        try:
-            output = await tool.handler(**arguments)
-            duration_ms = (time.time() - start) * 1000
+        sandbox_result = await self._sandbox.execute(
+            tool_name=name,
+            handler=tool.handler,
+            input_schema=tool.input_schema,
+            arguments=arguments,
+            requires_auth=tool.requires_auth,
+            caller=caller,
+        )
 
-            result = ToolCallResult(
-                tool_name=name,
-                success=True,
-                result=output,
-                duration_ms=duration_ms,
-            )
-        except Exception as e:
-            duration_ms = (time.time() - start) * 1000
-            result = ToolCallResult(
-                tool_name=name,
-                success=False,
-                error=str(e),
-                duration_ms=duration_ms,
-            )
-
+        result = ToolCallResult(
+            tool_name=name,
+            success=sandbox_result["success"],
+            result=sandbox_result["result"],
+            error=sandbox_result.get("error"),
+            duration_ms=sandbox_result["duration_ms"],
+        )
         self._call_log.append(result)
         return result
 
@@ -142,9 +141,24 @@ class MCPToolServer:
         处理JSON-RPC 2.0请求。
         MCP协议传输层实现。
         """
-        method = request.get("method", "")
-        params = request.get("params", {})
         req_id = request.get("id", 1)
+
+        if request.get("jsonrpc") != "2.0":
+            return {
+                "jsonrpc": "2.0",
+                "error": {"code": -32600, "message": "Invalid JSON-RPC request: missing or invalid 'jsonrpc' field"},
+                "id": req_id,
+            }
+
+        method = request.get("method", "")
+        if not method:
+            return {
+                "jsonrpc": "2.0",
+                "error": {"code": -32600, "message": "Invalid JSON-RPC request: missing 'method'"},
+                "id": req_id,
+            }
+
+        params = request.get("params", {})
 
         try:
             if method == "tools/list":

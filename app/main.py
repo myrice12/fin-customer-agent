@@ -10,7 +10,7 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Literal
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -24,9 +24,13 @@ from app.memory.working_memory import WorkingMemory
 from app.memory.short_term import ShortTermMemory
 from app.memory.long_term import LongTermMemory
 from app.mcp.mcp_server import MCPToolServer, create_default_tools
-from app.tracing.otel_config import init_tracer, get_agent_metrics
+from app.tracing.otel_config import init_tracer, get_agent_metrics, shutdown_tracer
 from app.evaluation.rag_metrics import RAGEvalCase, evaluate_rag_case
+from app.evaluation.business_metrics import run_business_evaluation
 from app.skills.registry import create_default_skill_registry
+from app.harness.middleware import setup_middleware
+from app.harness.auth import load_api_keys
+from app.harness.health import comprehensive_health_check
 
 load_dotenv()
 
@@ -47,7 +51,7 @@ async def lifespan(app: FastAPI):
     global graph
 
     init_tracer(
-        service_name=os.getenv("OTEL_SERVICE_NAME", "smart-cs-multi-agent"),
+        service_name=os.getenv("OTEL_SERVICE_NAME", "fin-customer-agent"),
         otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
     )
 
@@ -57,18 +61,9 @@ async def lifespan(app: FastAPI):
         long_term_memory=long_term_memory,
     )
 
-    await long_term_memory.add_document(
-        content="我们的理财产品A年化收益率为3.5%-5.2%，投资期限为6个月至3年，最低投资金额10000元。注意：理财非存款，产品有风险，投资须谨慎。",
-        source="product_faq.md",
-    )
-    await long_term_memory.add_document(
-        content="退款政策：用户在购买后7天内可申请无理由退款，超过7天需提供合理原因。退款将在3-5个工作日内原路退回。",
-        source="refund_policy.md",
-    )
-    await long_term_memory.add_document(
-        content="开户流程：1.准备身份证原件 2.填写开户申请表 3.进行视频认证 4.设置交易密码 5.完成风险评估问卷。整个流程约需15-30分钟。",
-        source="account_guide.md",
-    )
+    kb_count = await long_term_memory.load_knowledge_base("knowledge_base")
+    import logging
+    logging.getLogger(__name__).info("Knowledge base loaded: %d chunks", kb_count)
 
     async def _cleanup_loop():
         while True:
@@ -84,6 +79,8 @@ async def lifespan(app: FastAPI):
 
     cleanup_task = asyncio.create_task(_cleanup_loop())
 
+    load_api_keys()
+
     yield
 
     cleanup_task.cancel()
@@ -92,6 +89,7 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     await long_term_memory.close()
+    shutdown_tracer()
 
 
 app = FastAPI(
@@ -103,11 +101,13 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:8000").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+setup_middleware(app)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -129,6 +129,11 @@ class RAGEvalRequest(BaseModel):
     question: str
     gold_sources: list[str]
     gold_answer_points: list[str] = []
+
+
+class ToolCallRequest(BaseModel):
+    name: str
+    arguments: dict = {}
 
 
 @app.get("/", include_in_schema=False)
@@ -163,7 +168,9 @@ async def chat(request: ChatRequest):
     config = {"configurable": {"thread_id": session_id}}
 
     try:
-        result = await graph.ainvoke(initial_state, config=config)
+        result = await asyncio.wait_for(graph.ainvoke(initial_state, config=config), timeout=120.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="请求处理超时，请稍后重试")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"处理失败: {str(e)}")
 
@@ -277,11 +284,11 @@ async def list_skills(tag: str | None = None):
 
 
 @app.post("/api/tools/call")
-async def call_tool(request: dict):
+async def call_tool(request: ToolCallRequest):
     """MCP工具调用接口"""
     result = await mcp_server.call_tool(
-        name=request.get("name", ""),
-        arguments=request.get("arguments", {}),
+        name=request.name,
+        arguments=request.arguments,
     )
     return {
         "success": result.success,
@@ -330,9 +337,19 @@ async def evaluate_rag(request: RAGEvalRequest):
     }
 
 
+@app.post("/api/evaluate/business")
+async def evaluate_business_metrics(routing_mode: Literal["live", "skip"] = "live"):
+    """离线业务指标评测：问答命中、人工耗时估算、路由、合规和上下文压缩。"""
+    return await run_business_evaluation(kb_dir="knowledge_base", routing_mode=routing_mode)
+
+
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "version": "1.0.0"}
+    health = await comprehensive_health_check(
+        short_term_memory=short_term_memory,
+        long_term_memory=long_term_memory,
+    )
+    return {**health, "version": "1.0.0"}
 
 
 @app.get("/api/sessions/stats")

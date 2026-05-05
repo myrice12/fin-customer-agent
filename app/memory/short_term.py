@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from datetime import datetime
 from typing import Any
@@ -15,6 +16,8 @@ try:
     import redis.asyncio as aioredis
 except ImportError:
     aioredis = None
+
+logger = logging.getLogger(__name__)
 
 
 class ShortTermMemory:
@@ -49,9 +52,21 @@ class ShortTermMemory:
             try:
                 self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
                 await self._redis.ping()
-            except Exception:
+            except Exception as e:
+                logger.warning("Redis connection failed, using in-memory fallback: %s", e)
                 self._redis = None
         return self._redis
+
+    async def health_check(self) -> bool:
+        """检查 Redis 连接是否正常"""
+        try:
+            r = await self._get_redis()
+            if r is not None:
+                await r.ping()
+                return True
+        except Exception:
+            pass
+        return False
 
     def _session_key(self, session_id: str) -> str:
         return f"smartcs:short_term:{session_id}"

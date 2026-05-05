@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from datetime import datetime
 from enum import Enum
@@ -13,8 +15,11 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.tracing.otel_config import trace_agent_call
+
+logger = logging.getLogger(__name__)
 
 
 class TicketStatus(str, Enum):
@@ -109,6 +114,10 @@ class TicketHandlerAgent:
         self.llm = llm
         self.ticket_store = ticket_store or TicketStore()
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+    async def _call_llm(self, messages):
+        return await asyncio.wait_for(self.llm.ainvoke(messages), timeout=30.0)
+
     @trace_agent_call("ticket_analyze")
     async def analyze_request(self, user_message: str) -> dict:
         """分析用户需求，提取工单信息"""
@@ -117,7 +126,7 @@ class TicketHandlerAgent:
             HumanMessage(content=f"用户消息: {user_message}"),
         ]
 
-        response = await self.llm.ainvoke(messages)
+        response = await self._call_llm(messages)
 
         import json
         try:
@@ -192,14 +201,29 @@ class TicketHandlerAgent:
             return state
 
         last_message = messages[-1].content
-        ticket_info = await self.analyze_request(last_message)
+
+        try:
+            ticket_info = await self.analyze_request(last_message)
+        except Exception as e:
+            logger.error("Ticket analysis failed: %s", e, exc_info=True)
+            ticket_info = {
+                "action": "create",
+                "ticket_type": "general",
+                "priority": "medium",
+                "summary": last_message[:100],
+                "details": last_message,
+            }
 
         action = ticket_info.get("action", "create")
 
-        if action == "query" and "ticket_id" in ticket_info:
-            result = await self.query_ticket(ticket_info["ticket_id"])
-        else:
-            result = await self.create_ticket(ticket_info, user_id)
+        try:
+            if action == "query" and "ticket_id" in ticket_info:
+                result = await self.query_ticket(ticket_info["ticket_id"])
+            else:
+                result = await self.create_ticket(ticket_info, user_id)
+        except Exception as e:
+            logger.error("Ticket operation failed: %s", e, exc_info=True)
+            result = "抱歉，工单处理遇到异常，请稍后重试或联系人工客服。"
 
         return {
             **state,

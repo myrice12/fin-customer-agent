@@ -47,12 +47,14 @@ class WorkingMemory:
 
     def get_context(self, session_id: str) -> dict[str, Any]:
         """获取当前session的完整上下文"""
-        return dict(self._context.get(session_id, {}))
+        with self._lock:
+            return dict(self._context.get(session_id, {}))
 
     def get_history(self, session_id: str, last_n: int = 10) -> list[dict]:
         """获取最近N条工作记忆记录"""
-        entries = self._store.get(session_id, [])
-        return entries[-last_n:]
+        with self._lock:
+            entries = self._store.get(session_id, [])
+            return entries[-last_n:]
 
     def clear(self, session_id: str) -> None:
         """清除指定session的工作记忆"""

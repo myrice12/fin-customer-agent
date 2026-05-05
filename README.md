@@ -189,7 +189,7 @@ docker-compose up -d
 | `EMBEDDING_DIM` | 嵌入向量维度 | `1024` |
 | `REDIS_URL` | Redis 连接地址 | `redis://localhost:6379/0` |
 | `FAISS_INDEX_PATH` | FAISS 索引存储路径 | `./vector_store/faiss_index` |
-| `OTEL_SERVICE_NAME` | 链路追踪服务名 | `smart-cs-multi-agent` |
+| `OTEL_SERVICE_NAME` | 链路追踪服务名 | `fin-customer-agent` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP 上报地址 | 空（不上报） |
 | `HOST` | 服务监听地址 | `0.0.0.0` |
 | `PORT` | 服务端口 | `8000` |
@@ -260,6 +260,22 @@ curl -X POST http://localhost:8000/api/evaluate/rag \
     "gold_sources": ["product_faq.md"],
     "gold_answer_points": ["6个月至3年"]
   }'
+
+# 业务指标离线评测
+curl -X POST http://localhost:8000/api/evaluate/business
+
+# 跳过 Supervisor 实时路由评测
+curl -X POST 'http://localhost:8000/api/evaluate/business?routing_mode=skip'
+
+# 生成 Markdown 评测报告
+python scripts/run_business_evaluation.py
+
+# 未配置可用 LLM API 时，可跳过 Supervisor 实时路由评测
+python scripts/run_business_evaluation.py --routing-mode skip
+
+# live 路由评测可通过环境变量控制超时与并发
+ROUTING_EVAL_TIMEOUT_SECONDS=10 ROUTING_EVAL_CONCURRENCY=5 \
+  python scripts/run_business_evaluation.py --routing-mode live
 ```
 
 ---
@@ -350,7 +366,3 @@ PII 信息自动脱敏处理，违规内容标记风险等级（low / medium / h
 [MIT License](LICENSE)
 
 ---
-
-## 致谢
-
-本项目基于 [bcefghj/smart-cs-multi-agent](https://github.com/bcefghj/smart-cs-multi-agent) 开发，感谢原作者提供的基础架构与灵感。

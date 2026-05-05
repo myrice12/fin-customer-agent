@@ -1,0 +1,7 @@
+# 本地 Embedding Server 依赖（仅在宿主机安装，不进 Docker）
+fastapi>=0.115.0
+uvicorn>=0.32.0
+pydantic>=2.10.0
+torch>=2.1.0
+transformers>=4.40.0
+numpy>=1.26.0

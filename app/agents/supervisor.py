@@ -6,6 +6,8 @@ Supervisor编排Agent — 中央协调者
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from typing import Annotated, Any, Literal, TypedDict
 
@@ -14,6 +16,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.agents.intent_router import IntentRouterAgent
 from app.agents.knowledge_rag import KnowledgeRAGAgent
@@ -23,6 +26,8 @@ from app.memory.working_memory import WorkingMemory
 from app.memory.short_term import ShortTermMemory
 from app.memory.long_term import LongTermMemory
 from app.tracing.otel_config import trace_agent_call
+
+logger = logging.getLogger(__name__)
 
 
 # ─── 状态定义 ───
@@ -71,6 +76,10 @@ class SupervisorNode:
         self.working_memory = working_memory
         self.short_term_memory = short_term_memory
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+    async def _call_llm(self, messages):
+        return await asyncio.wait_for(self.llm.ainvoke(messages), timeout=30.0)
+
     @trace_agent_call("supervisor")
     async def route_decision(self, state: AgentState) -> AgentState:
         """分析用户意图，决定路由"""
@@ -96,8 +105,12 @@ class SupervisorNode:
             )),
         ]
 
-        response = await self.llm.ainvoke(routing_prompt)
-        intent = response.content.strip().lower()
+        try:
+            response = await self._call_llm(routing_prompt)
+            intent = response.content.strip().lower()
+        except Exception as e:
+            logger.warning("Supervisor routing LLM failed, defaulting to knowledge_rag: %s", e)
+            intent = "knowledge_rag"
 
         valid_intents = {"knowledge_rag", "ticket_handler", "compliance_checker"}
         if intent not in valid_intents:

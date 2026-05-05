@@ -11,6 +11,8 @@ import json
 import logging
 import os
 import re
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +68,8 @@ class LongTermMemory:
         self._documents: list[dict[str, Any]] = []
         self._index = None
         self._embedding_available = True
+        self._embedding_cooldown_until = 0.0
+        self._index_lock = threading.Lock()
         self._init_index()
 
     def _init_index(self):
@@ -108,8 +112,10 @@ class LongTermMemory:
         return self._client
 
     async def _get_embedding(self, text: str) -> np.ndarray | None:
-        """通过OpenAI兼容API获取文本嵌入向量，失败时返回None"""
-        if not self._embedding_available or not self._api_base:
+        """通过OpenAI兼容API获取文本嵌入向量，熔断器模式：失败后冷却60s再重试。"""
+        if not self._api_base:
+            return None
+        if time.time() < self._embedding_cooldown_until:
             return None
         try:
             client = self._get_client()
@@ -122,15 +128,20 @@ class LongTermMemory:
             norm = np.linalg.norm(vec)
             if norm > 0:
                 vec /= norm
+            self._embedding_cooldown_until = 0.0
+            self._embedding_available = True
             return vec
         except Exception as e:
-            logger.warning("Embedding API 调用失败，降级为纯词法检索: %s", e)
+            logger.warning("Embedding API 调用失败，冷却60s后重试: %s", e)
+            self._embedding_cooldown_until = time.time() + 60
             self._embedding_available = False
             return None
 
     async def _get_embeddings_batch(self, texts: list[str]) -> list[np.ndarray]:
-        """批量获取嵌入向量，失败时返回空列表"""
-        if not texts or not self._embedding_available or not self._api_base:
+        """批量获取嵌入向量，熔断器模式。"""
+        if not texts or not self._api_base:
+            return []
+        if time.time() < self._embedding_cooldown_until:
             return []
         try:
             client = self._get_client()
@@ -149,7 +160,8 @@ class LongTermMemory:
                 vectors.append(vec)
             return vectors
         except Exception as e:
-            logger.warning("批量 Embedding API 调用失败，降级为纯词法检索: %s", e)
+            logger.warning("批量 Embedding API 调用失败，冷却60s后重试: %s", e)
+            self._embedding_cooldown_until = time.time() + 60
             self._embedding_available = False
             return []
 
@@ -163,11 +175,11 @@ class LongTermMemory:
             "source": source,
             "metadata": metadata or {},
         }
-        self._documents.append(doc)
+        embedding = await self._get_embedding(content)
 
-        if self._index is not None:
-            embedding = await self._get_embedding(content)
-            if embedding is not None:
+        with self._index_lock:
+            self._documents.append(doc)
+            if self._index is not None and embedding is not None:
                 self._index.add(embedding.reshape(1, -1))
 
         return doc_id
@@ -177,7 +189,7 @@ class LongTermMemory:
         if not documents:
             return []
 
-        doc_ids = []
+        entries = []
         contents = []
         for doc in documents:
             doc_id = hashlib.md5(doc.get("content", "").encode()).hexdigest()[:12]
@@ -187,17 +199,19 @@ class LongTermMemory:
                 "source": doc.get("source", ""),
                 "metadata": doc.get("metadata", {}),
             }
-            self._documents.append(entry)
-            doc_ids.append(doc_id)
+            entries.append(entry)
             contents.append(entry["content"])
 
-        if self._index is not None and contents:
-            vectors = await self._get_embeddings_batch(contents)
-            if vectors:
+        vectors = await self._get_embeddings_batch(contents)
+
+        with self._index_lock:
+            for entry in entries:
+                self._documents.append(entry)
+            if self._index is not None and vectors:
                 batch = np.stack(vectors)
                 self._index.add(batch)
 
-        return doc_ids
+        return [e["id"] for e in entries]
 
     async def search(self, query: str, top_k: int = 5) -> list[dict]:
         """语义相似度检索，并融合轻量关键词相关性重排。Embedding 不可用时降级为纯词法检索。"""
@@ -209,35 +223,56 @@ class LongTermMemory:
             return self._fallback_search(query, top_k)
 
         query_vec = query_embedding.reshape(1, -1)
-        candidate_k = min(max(top_k * 3, top_k), len(self._documents))
-        scores, indices = self._index.search(query_vec, candidate_k)
 
-        results = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx < 0 or idx >= len(self._documents):
-                continue
-            doc = self._documents[idx].copy()
-            lexical_score = self._lexical_score(query, doc.get("content", ""))
-            doc["vector_score"] = float(score)
-            doc["lexical_score"] = lexical_score
-            doc["score"] = (0.35 * float(score)) + (0.65 * lexical_score)
-            results.append(doc)
+        with self._index_lock:
+            candidate_k = min(max(top_k * 3, top_k), len(self._documents))
+            scores, indices = self._index.search(query_vec, candidate_k)
 
-        seen_doc_ids = {doc["id"] for doc in results}
-        for doc in self._documents:
-            if doc["id"] in seen_doc_ids:
-                continue
-            copied = doc.copy()
-            lexical_score = self._lexical_score(query, copied.get("content", ""))
-            if lexical_score <= 0:
-                continue
-            copied["vector_score"] = 0.0
-            copied["lexical_score"] = lexical_score
-            copied["score"] = lexical_score
-            results.append(copied)
+            results = []
+            for score, idx in zip(scores[0], indices[0]):
+                if idx < 0 or idx >= len(self._documents):
+                    continue
+                doc = self._documents[idx].copy()
+                lexical_score = self._lexical_score(query, doc.get("content", ""))
+                doc["vector_score"] = float(score)
+                doc["lexical_score"] = lexical_score
+                doc["score"] = (0.35 * float(score)) + (0.65 * lexical_score)
+                results.append(doc)
+
+            seen_doc_ids = {doc["id"] for doc in results}
+            for doc in self._documents:
+                if doc["id"] in seen_doc_ids:
+                    continue
+                copied = doc.copy()
+                lexical_score = self._lexical_score(query, copied.get("content", ""))
+                if lexical_score <= 0:
+                    continue
+                copied["vector_score"] = 0.0
+                copied["lexical_score"] = lexical_score
+                copied["score"] = lexical_score
+                results.append(copied)
 
         results.sort(key=lambda doc: doc.get("score", 0.0), reverse=True)
         return results[:top_k]
+
+    def _fallback_search(self, query: str, top_k: int) -> list[dict]:
+        """当FAISS不可用时的关键词回退搜索"""
+        with self._index_lock:
+            scored = []
+            for doc in self._documents:
+                score = self._lexical_score(query, doc["content"])
+                if score > 0:
+                    scored.append((score, doc))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        results = []
+        for score, doc in scored[:top_k]:
+            copied = doc.copy()
+            copied["score"] = score
+            copied["lexical_score"] = score
+            copied["vector_score"] = 0.0
+            results.append(copied)
+        return results
 
     @staticmethod
     def _query_terms(query: str) -> set[str]:
@@ -281,25 +316,6 @@ class LongTermMemory:
 
         return min(1.0, coverage + exact_bonus)
 
-    def _fallback_search(self, query: str, top_k: int) -> list[dict]:
-        """当FAISS不可用时的关键词回退搜索"""
-        scored = []
-
-        for doc in self._documents:
-            score = self._lexical_score(query, doc["content"])
-            if score > 0:
-                scored.append((score, doc))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        results = []
-        for score, doc in scored[:top_k]:
-            copied = doc.copy()
-            copied["score"] = score
-            copied["lexical_score"] = score
-            copied["vector_score"] = 0.0
-            results.append(copied)
-        return results
-
     def save(self):
         """持久化索引到磁盘"""
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -323,7 +339,9 @@ class LongTermMemory:
             return 0
 
         all_chunks: list[dict] = []
-        for file_path in kb_path.glob("**/*.txt"):
+        for file_path in sorted(kb_path.glob("**/*")):
+            if file_path.suffix not in (".txt", ".md"):
+                continue
             content = file_path.read_text(encoding="utf-8")
             chunks = self._chunk_text(content)
             for chunk in chunks:

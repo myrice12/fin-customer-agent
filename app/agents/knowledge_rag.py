@@ -6,13 +6,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.memory.long_term import LongTermMemory
 from app.tracing.otel_config import trace_agent_call
+
+logger = logging.getLogger(__name__)
 
 
 RAG_SYSTEM_PROMPT = """你是一个专业的知识库问答Agent，负责根据检索到的文档回答用户问题。
@@ -45,13 +50,17 @@ class KnowledgeRAGAgent:
         self.llm = llm
         self.long_term_memory = long_term_memory or LongTermMemory()
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+    async def _call_llm(self, messages):
+        return await asyncio.wait_for(self.llm.ainvoke(messages), timeout=30.0)
+
     @trace_agent_call("rag_query_rewrite")
     async def rewrite_query(self, original_query: str) -> str:
         """Query改写：将口语化问题转为检索友好的查询"""
         messages = [
             HumanMessage(content=QUERY_REWRITE_PROMPT.format(query=original_query)),
         ]
-        response = await self.llm.ainvoke(messages)
+        response = await self._call_llm(messages)
         return response.content.strip()
 
     @trace_agent_call("rag_retrieve")
@@ -82,7 +91,7 @@ class KnowledgeRAGAgent:
             )),
         ]
 
-        response = await self.llm.ainvoke(messages)
+        response = await self._call_llm(messages)
 
         try:
             indices = [int(i.strip()) for i in response.content.split(",")]
@@ -111,7 +120,7 @@ class KnowledgeRAGAgent:
             )),
         ]
 
-        response = await self.llm.ainvoke(messages)
+        response = await self._call_llm(messages)
         return response.content
 
     @trace_agent_call("knowledge_rag_process")
@@ -122,6 +131,7 @@ class KnowledgeRAGAgent:
         2. 向量检索
         3. 重排序
         4. 生成回答
+        每一步都有错误恢复。
         """
         messages = state.get("messages", [])
         if not messages:
@@ -129,13 +139,29 @@ class KnowledgeRAGAgent:
 
         original_query = messages[-1].content
 
-        rewritten_query = await self.rewrite_query(original_query)
+        try:
+            rewritten_query = await self.rewrite_query(original_query)
+        except Exception as e:
+            logger.warning("Query rewrite failed, using original: %s", e)
+            rewritten_query = original_query
 
-        raw_docs = await self.retrieve_documents(rewritten_query, top_k=5)
+        try:
+            raw_docs = await self.retrieve_documents(rewritten_query, top_k=5)
+        except Exception as e:
+            logger.error("Document retrieval failed: %s", e, exc_info=True)
+            raw_docs = []
 
-        reranked_docs = await self.rerank_documents(rewritten_query, raw_docs, top_k=3)
+        try:
+            reranked_docs = await self.rerank_documents(rewritten_query, raw_docs, top_k=3)
+        except Exception as e:
+            logger.warning("Reranking failed, using raw results: %s", e)
+            reranked_docs = raw_docs[:3]
 
-        answer = await self.generate_answer(original_query, reranked_docs)
+        try:
+            answer = await self.generate_answer(original_query, reranked_docs)
+        except Exception as e:
+            logger.error("Answer generation failed: %s", e, exc_info=True)
+            answer = "抱歉，系统处理您的问题时遇到异常，请稍后重试或联系人工客服。"
 
         return {
             **state,

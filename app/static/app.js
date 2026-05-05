@@ -2,27 +2,14 @@ const chatLog = document.querySelector("#chatLog");
 const chatForm = document.querySelector("#chatForm");
 const input = document.querySelector("#messageInput");
 const sendButton = document.querySelector("#sendButton");
-const healthText = document.querySelector("#healthText");
-const sessionText = document.querySelector("#sessionText");
-const intentText = document.querySelector("#intentText");
 const latencyText = document.querySelector("#latencyText");
 const complianceBadge = document.querySelector("#complianceBadge");
-const toolList = document.querySelector("#toolList");
-const toolCountText = document.querySelector("#toolCountText");
-const messageCountText = document.querySelector("#messageCountText");
-const resultText = document.querySelector("#resultText");
 
 let sessionId = localStorage.getItem("smartcs.sessionId") || "";
-let messageCount = 1;
 
 function setSession(id) {
   sessionId = id;
   localStorage.setItem("smartcs.sessionId", id);
-  sessionText.textContent = id ? id.slice(0, 8) : "New thread";
-}
-
-function updateMessageCount() {
-  messageCountText.textContent = `${messageCount} msg`;
 }
 
 function addMessage(role, text) {
@@ -36,22 +23,13 @@ function addMessage(role, text) {
   const body = document.createElement("div");
   body.className = "message-body";
 
-  const meta = document.createElement("div");
-  meta.className = "message-meta";
-  meta.innerHTML =
-    role === "user"
-      ? "<span>Client</span><span>Submitted</span>"
-      : "<span>Assistant</span><span>Processed</span>";
-
   const content = document.createElement("p");
   content.textContent = text;
 
-  body.append(meta, content);
+  body.append(content);
   article.append(mark, body);
   chatLog.append(article);
   chatLog.scrollTop = chatLog.scrollHeight;
-  messageCount += 1;
-  updateMessageCount();
   return article;
 }
 
@@ -68,39 +46,7 @@ function resizeInput() {
 
 function setComplianceState(state, label) {
   complianceBadge.textContent = label;
-  complianceBadge.classList.toggle("pass", state === "pass");
-  complianceBadge.classList.toggle("fail", state === "fail");
-  resultText.textContent = label;
-}
-
-async function checkHealth() {
-  try {
-    const response = await fetch("/health");
-    if (!response.ok) throw new Error();
-    healthText.textContent = "Online";
-  } catch {
-    healthText.textContent = "Offline";
-  }
-}
-
-async function loadTools() {
-  try {
-    const response = await fetch("/api/tools");
-    const data = await response.json();
-    const tools = data.tools || [];
-    toolCountText.textContent = `${tools.length}`;
-    toolList.innerHTML = "";
-
-    tools.slice(0, 6).forEach((tool) => {
-      const item = document.createElement("span");
-      item.className = "tool-pill";
-      item.textContent = tool.name;
-      toolList.append(item);
-    });
-  } catch {
-    toolCountText.textContent = "--";
-    toolList.innerHTML = '<span class="tool-pill">Tools unavailable</span>';
-  }
+  complianceBadge.className = `status-chip ${state}`;
 }
 
 async function sendMessage(message) {
@@ -111,7 +57,6 @@ async function sendMessage(message) {
 
   const startedAt = performance.now();
   const contentEl = pending.querySelector("p");
-  const metaEl = pending.querySelector(".message-meta");
 
   try {
     const response = await fetch("/api/chat/stream", {
@@ -154,19 +99,11 @@ async function sendMessage(message) {
 
             if (eventType === "node_update") {
               contentEl.textContent = data.display || "处理中...";
-              if (data.intent) {
-                intentText.textContent = data.intent;
-              }
             } else if (eventType === "final") {
               const duration = performance.now() - startedAt;
               latencyText.textContent = `${Math.round(duration)} ms`;
               contentEl.textContent = data.response;
-              metaEl.innerHTML = `
-                <span>Assistant</span>
-                <span>${data.intent || "unknown"}</span>
-              `;
               setSession(data.session_id);
-              intentText.textContent = data.intent || "unknown";
               setComplianceState(
                 data.compliance_passed ? "pass" : "fail",
                 data.compliance_passed ? "Passed" : "Escalated"
@@ -182,7 +119,6 @@ async function sendMessage(message) {
     }
   } catch (error) {
     contentEl.textContent = `请求失败：${error.message}`;
-    metaEl.innerHTML = "<span>Assistant</span><span>Failed</span>";
     setComplianceState("fail", "Failed");
   } finally {
     setBusy(false);
@@ -216,6 +152,3 @@ document.querySelectorAll("[data-prompt]").forEach((button) => {
 });
 
 setSession(sessionId);
-updateMessageCount();
-checkHealth();
-loadTools();

@@ -2,6 +2,7 @@
 Skill能力注册器。
 
 Skill用于沉淀可复用的业务SOP、合规话术、UI规范或任务执行方法。
+支持基于 Agent 的访问控制（ACL）。
 """
 
 from __future__ import annotations
@@ -19,10 +20,12 @@ class Skill:
     tags: list[str] = field(default_factory=list)
     entrypoint: str = ""
     path: str = ""
+    allowed_agents: list[str] = field(default_factory=list)  # 空=全部可用
+    usage_count: int = 0
 
 
 class SkillRegistry:
-    """内存Skill注册与发现。"""
+    """内存Skill注册与发现，支持访问控制。"""
 
     def __init__(self, skill_root: str = "skill"):
         self.skill_root = Path(skill_root)
@@ -30,6 +33,25 @@ class SkillRegistry:
 
     def register(self, skill: Skill) -> None:
         self._skills[skill.name] = skill
+
+    def unregister(self, name: str) -> bool:
+        """注销一个 Skill，返回是否成功"""
+        return self._skills.pop(name, None) is not None
+
+    def check_access(self, skill_name: str, agent_name: str) -> bool:
+        """检查指定 Agent 是否有权使用该 Skill"""
+        skill = self._skills.get(skill_name)
+        if not skill:
+            return False
+        if not skill.allowed_agents:
+            return True  # 未设置限制，全部可用
+        return agent_name in skill.allowed_agents
+
+    def record_usage(self, skill_name: str) -> None:
+        """记录 Skill 使用次数"""
+        skill = self._skills.get(skill_name)
+        if skill:
+            skill.usage_count += 1
 
     def list_skills(self, tag: str | None = None) -> list[dict]:
         skills = self._skills.values()
@@ -42,6 +64,8 @@ class SkillRegistry:
                 "tags": skill.tags,
                 "entrypoint": skill.entrypoint,
                 "path": skill.path,
+                "allowed_agents": skill.allowed_agents,
+                "usage_count": skill.usage_count,
             }
             for skill in skills
         ]
@@ -60,6 +84,8 @@ class SkillRegistry:
                 "tags": skill.tags,
                 "entrypoint": skill.entrypoint,
                 "path": skill.path,
+                "allowed_agents": skill.allowed_agents,
+                "usage_count": skill.usage_count,
             }
             for skill in matched
         ]

@@ -11,12 +11,19 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+import asyncio
+import logging
+
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.tracing.otel_config import trace_agent_call
+
+if TYPE_CHECKING:
+    from langchain_openai import ChatOpenAI
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -34,13 +41,32 @@ SENSITIVE_PATTERNS = {
     "id_card": r"\d{17}[\dXx]",
     "bank_card": r"\b\d{16,19}\b",
     "email": r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+    "verification_code": r"(验证码|校验码|动态码)[^\d]{0,8}\d{4,8}",
 }
 
 FORBIDDEN_TERMS = [
     "保证收益", "稳赚不赔", "零风险", "保本保息",
-    "最高收益", "预期收益率", "承诺回报",
+    "最高收益", "承诺回报", "固定回报",
     "内部消息", "内幕", "暗箱操作",
 ]
+
+SEMANTIC_RISK_PATTERNS = {
+    "收益或本金确定性承诺": [
+        r"(肯定|一定|绝对|保证).{0,8}(不会亏|不亏|安全|达到|通过|全额到账)",
+        r"(本金|本息).{0,8}(绝对|一定|肯定).{0,8}(安全|保障)",
+        r"(过往收益).{0,8}(未来收益)",
+        r"(保本).{0,8}(无需|不用).{0,8}风险提示",
+    ],
+    "适当性或风控绕过": [
+        r"(绕过|跳过|规避).{0,8}(测评|风险测评|适当性评估|审核)",
+        r"(高风险产品).{0,8}(包装|说成).{0,8}(稳健|低风险)",
+        r"(弱化|不提示|隐藏).{0,8}(风险|手续费|费用)",
+    ],
+    "敏感凭证处理不当": [
+        r"(保存|记录|公开|完整回显|完整返回).{0,12}(密码|验证码|证件|身份证|银行卡)",
+        r"(验证码|身份证照片|银行卡密码).{0,12}(发给|发送|公开|保存|记录)",
+    ],
+}
 
 COMPLIANCE_SYSTEM_PROMPT = """你是一个金融合规审查Agent，负责审查客服回复内容的合规性。
 
@@ -64,7 +90,7 @@ COMPLIANCE_SYSTEM_PROMPT = """你是一个金融合规审查Agent，负责审查
 class ComplianceCheckerAgent:
     """合规审查Agent"""
 
-    def __init__(self, llm: ChatOpenAI):
+    def __init__(self, llm: "ChatOpenAI"):
         self.llm = llm
 
     def _rule_based_check(self, content: str) -> list[str]:
@@ -75,13 +101,19 @@ class ComplianceCheckerAgent:
             if term in content:
                 violations.append(f"包含违规金融用语: '{term}'")
 
+        for risk_name, patterns in SEMANTIC_RISK_PATTERNS.items():
+            for pattern in patterns:
+                if re.search(pattern, content):
+                    violations.append(f"命中语义风险模式: {risk_name}")
+                    break
+
         id_card_spans = [
             match.span()
             for match in re.finditer(SENSITIVE_PATTERNS["id_card"], content)
         ]
         for pii_type, pattern in SENSITIVE_PATTERNS.items():
             matches = list(re.finditer(pattern, content))
-            if pii_type == "bank_card":
+            if pii_type in ("phone", "bank_card"):
                 matches = [
                     match for match in matches
                     if not any(
@@ -93,6 +125,7 @@ class ComplianceCheckerAgent:
                 label = {
                     "phone": "手机号", "id_card": "身份证号",
                     "bank_card": "银行卡号", "email": "邮箱地址",
+                    "verification_code": "验证码",
                 }.get(pii_type, pii_type)
                 violations.append(f"检测到PII信息泄露: {label}")
 
@@ -151,10 +184,11 @@ class ComplianceCheckerAgent:
 
         has_pii = any("PII" in v for v in violations)
         has_forbidden = any("违规金融用语" in v for v in violations)
+        has_semantic_risk = any("语义风险模式" in v for v in violations)
 
         if has_pii and has_forbidden:
             risk_level = "critical"
-        elif has_pii or has_forbidden:
+        elif has_pii or has_forbidden or has_semantic_risk:
             risk_level = "high"
         else:
             risk_level = "medium"
@@ -166,21 +200,42 @@ class ComplianceCheckerAgent:
             sanitized_content=sanitized,
         )
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+    async def _call_llm(self, messages):
+        return await asyncio.wait_for(self.llm.ainvoke(messages), timeout=30.0)
+
     @trace_agent_call("compliance_llm_check")
     async def llm_check(self, content: str) -> ComplianceResult:
         """LLM深度合规审查（处理规则引擎无法覆盖的场景）"""
+        from langchain_core.messages import HumanMessage, SystemMessage
+
         messages = [
             SystemMessage(content=COMPLIANCE_SYSTEM_PROMPT),
             HumanMessage(content=f"请审查以下客服回复内容的合规性：\n\n{content}"),
         ]
 
-        response = await self.llm.ainvoke(messages)
+        try:
+            response = await self._call_llm(messages)
+        except Exception as e:
+            logger.warning("Compliance LLM check failed: %s", e)
+            return ComplianceResult(
+                passed=False, risk_level="high",
+                violations=[f"LLM合规审查调用失败: {type(e).__name__}"],
+                suggestions=["转人工坐席处理"],
+                sanitized_content=self._mask_pii(content),
+            )
 
         import json
         try:
             result = json.loads(response.content)
         except json.JSONDecodeError:
-            return ComplianceResult(passed=True, risk_level="low", sanitized_content=content)
+            return ComplianceResult(
+                passed=False,
+                risk_level="high",
+                violations=["LLM合规审查响应解析异常，触发人工审核"],
+                suggestions=["转人工坐席处理"],
+                sanitized_content=self._mask_pii(content),
+            )
 
         return ComplianceResult(
             passed=result.get("passed", True),
@@ -224,6 +279,26 @@ class ComplianceCheckerAgent:
     @trace_agent_call("compliance_process")
     async def process(self, state: dict[str, Any]) -> dict[str, Any]:
         """作为Graph节点处理状态"""
+        try:
+            return await self._process_impl(state)
+        except Exception as e:
+            logger.error("Compliance checker process failed: %s", e, exc_info=True)
+            return {
+                **state,
+                "compliance_passed": False,
+                "sub_results": {
+                    **state.get("sub_results", {}),
+                    "compliance": {
+                        "passed": False,
+                        "risk_level": "critical",
+                        "violations": [f"合规审查系统异常: {type(e).__name__}"],
+                        "error": str(e),
+                    },
+                },
+            }
+
+    async def _process_impl(self, state: dict[str, Any]) -> dict[str, Any]:
+        """合规审查实际实现"""
         sub_results = state.get("sub_results", {})
 
         content_to_check = ""
@@ -251,16 +326,17 @@ class ComplianceCheckerAgent:
 
         compliance_result = await self.full_check(content_to_check)
 
+        sanitized_results = dict(sub_results)
         if not compliance_result.passed:
-            for key in sub_results:
-                if isinstance(sub_results[key], str):
-                    sub_results[key] = compliance_result.sanitized_content
+            for key in sanitized_results:
+                if isinstance(sanitized_results[key], str):
+                    sanitized_results[key] = compliance_result.sanitized_content
 
         return {
             **state,
             "compliance_passed": compliance_result.passed,
             "sub_results": {
-                **sub_results,
+                **sanitized_results,
                 "compliance": {
                     "passed": compliance_result.passed,
                     "risk_level": compliance_result.risk_level,

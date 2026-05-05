@@ -13,9 +13,6 @@
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <div class="page-glow page-glow-a"></div>
-    <div class="page-glow page-glow-b"></div>
-
     <main class="shell">
       <aside class="sidebar" aria-label="导航">
         <div class="brand reveal">
@@ -28,26 +25,6 @@
 
         <section class="sidebar-panel reveal delay-1">
           <div class="section-head">
-            <span>Service status</span>
-          </div>
-          <dl class="status-list">
-            <div>
-              <dt>Service</dt>
-              <dd id="healthText">Checking</dd>
-            </div>
-            <div>
-              <dt>Thread</dt>
-              <dd id="sessionText">New thread</dd>
-            </div>
-            <div>
-              <dt>Intent</dt>
-              <dd id="intentText">Pending</dd>
-            </div>
-          </dl>
-        </section>
-
-        <section class="sidebar-panel reveal delay-2">
-          <div class="section-head">
             <span>Quick prompts</span>
           </div>
           <div class="prompt-list">
@@ -57,76 +34,25 @@
             <button type="button" class="prompt-chip" data-prompt="开户流程需要准备什么？">开户流程</button>
           </div>
         </section>
-
-        <section class="sidebar-panel reveal delay-2">
-          <div class="section-head">
-            <span>Access</span>
-          </div>
-          <nav class="mini-links">
-            <a href="/docs" target="_blank" rel="noreferrer">API Docs</a>
-            <a href="/api/tools" target="_blank" rel="noreferrer">Tool Schema</a>
-            <a href="/api/metrics" target="_blank" rel="noreferrer">Metrics</a>
-          </nav>
-        </section>
       </aside>
 
       <section class="workspace" aria-label="对话工作区">
-        <header class="hero reveal">
-          <div class="hero-copy">
-            <p class="eyebrow">Supervisor orchestrated workflow</p>
-            <h2>金融客服对话台</h2>
-            <p class="hero-text">
-              统一处理产品咨询、退款说明、开户流程和工单请求，自动完成路由、知识检索与合规检查。
-            </p>
-          </div>
-
-          <div class="hero-metrics">
-            <div class="metric-tile">
-              <span>Compliance</span>
-              <strong id="complianceBadge">Idle</strong>
-            </div>
-            <div class="metric-tile">
-              <span>Latency</span>
-              <strong id="latencyText">--</strong>
-            </div>
-            <div class="metric-tile">
-              <span>Messages</span>
-              <strong id="messageCountText">1 msg</strong>
-            </div>
-            <div class="metric-tile">
-              <span>Tools</span>
-              <strong id="toolCountText">--</strong>
-            </div>
-          </div>
-        </header>
-
-        <section class="conversation reveal delay-1">
+        <section class="conversation reveal">
           <div class="conversation-head">
-            <div>
-              <p class="eyebrow">Live conversation</p>
-              <h3>Session stream</h3>
+            <h3>金融客服对话台</h3>
+            <div class="head-status">
+              <span class="status-chip" id="complianceBadge">Idle</span>
+              <span class="status-chip muted" id="latencyText">--</span>
             </div>
-            <div class="result-badge" id="resultText">Ready</div>
           </div>
 
           <div class="chat-log" id="chatLog" aria-live="polite">
             <article class="message assistant">
               <div class="message-mark">AG</div>
               <div class="message-body">
-                <div class="message-meta">
-                  <span>Assistant</span>
-                  <span>Processed</span>
-                </div>
                 <p>你好，我可以处理退款、产品咨询、开户问答和工单请求。直接输入问题即可。</p>
               </div>
             </article>
-          </div>
-
-          <div class="footer-strip">
-            <div class="strip-label">Tool registry</div>
-            <div class="tool-strip" id="toolList">
-              <span class="tool-pill">Loading tools...</span>
-            </div>
           </div>
 
           <form class="composer" id="chatForm">
