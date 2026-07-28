@@ -6,12 +6,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import os
 import re
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -35,7 +35,6 @@ class LongTermMemory:
     - 向量化存储，支持语义相似度检索
     - 持久化到磁盘，跨会话保持
     - 支持增量更新和批量导入
-    - 生产环境可切换为Milvus/Pinecone
 
     文档分块策略：
     - 固定长度分块 (512 tokens) + 重叠窗口 (128 tokens)
@@ -62,14 +61,14 @@ class LongTermMemory:
         )
         self._model = (
             embedding_model
-            or os.getenv("EMBEDDING_MODEL_NAME", "Qwen3-Embedding-4B")
+            or os.getenv("EMBEDDING_MODEL_NAME", "Qwen3-Embedding-0.6B")
         )
         self._client: httpx.AsyncClient | None = None
         self._documents: list[dict[str, Any]] = []
         self._index = None
         self._embedding_available = True
         self._embedding_cooldown_until = 0.0
-        self._index_lock = threading.Lock()
+        self._index_lock = asyncio.Lock()
         self._init_index()
 
     def _init_index(self):
@@ -93,8 +92,14 @@ class LongTermMemory:
                 if metadata_path.exists():
                     with open(metadata_path, "r", encoding="utf-8") as f:
                         self._documents = json.load(f)
-            except Exception:
+                logger.info(
+                    "Loaded FAISS index from %s with %d vectors",
+                    self.index_path, self._index.ntotal,
+                )
+            except Exception as e:
+                logger.warning("Failed to load FAISS index, rebuilding: %s", e)
                 self._index = faiss.IndexFlatIP(self.embedding_dim)
+                self._documents = []
         else:
             self._index = faiss.IndexFlatIP(self.embedding_dim)
 
@@ -177,7 +182,7 @@ class LongTermMemory:
         }
         embedding = await self._get_embedding(content)
 
-        with self._index_lock:
+        async with self._index_lock:
             self._documents.append(doc)
             if self._index is not None and embedding is not None:
                 self._index.add(embedding.reshape(1, -1))
@@ -204,27 +209,28 @@ class LongTermMemory:
 
         vectors = await self._get_embeddings_batch(contents)
 
-        with self._index_lock:
+        async with self._index_lock:
             for entry in entries:
                 self._documents.append(entry)
             if self._index is not None and vectors:
                 batch = np.stack(vectors)
                 self._index.add(batch)
 
+        self.save()
         return [e["id"] for e in entries]
 
     async def search(self, query: str, top_k: int = 5) -> list[dict]:
         """语义相似度检索，并融合轻量关键词相关性重排。Embedding 不可用时降级为纯词法检索。"""
         if self._index is None or not self._documents:
-            return self._fallback_search(query, top_k)
+            return await self._fallback_search(query, top_k)
 
         query_embedding = await self._get_embedding(query)
         if query_embedding is None:
-            return self._fallback_search(query, top_k)
+            return await self._fallback_search(query, top_k)
 
         query_vec = query_embedding.reshape(1, -1)
 
-        with self._index_lock:
+        async with self._index_lock:
             candidate_k = min(max(top_k * 3, top_k), len(self._documents))
             scores, indices = self._index.search(query_vec, candidate_k)
 
@@ -255,9 +261,9 @@ class LongTermMemory:
         results.sort(key=lambda doc: doc.get("score", 0.0), reverse=True)
         return results[:top_k]
 
-    def _fallback_search(self, query: str, top_k: int) -> list[dict]:
+    async def _fallback_search(self, query: str, top_k: int) -> list[dict]:
         """当FAISS不可用时的关键词回退搜索"""
-        with self._index_lock:
+        async with self._index_lock:
             scored = []
             for doc in self._documents:
                 score = self._lexical_score(query, doc["content"])
@@ -276,18 +282,15 @@ class LongTermMemory:
 
     @staticmethod
     def _query_terms(query: str) -> set[str]:
-        """抽取适合中文客服短问句的轻量检索词。"""
-        normalized = query.lower()
-        terms = set(re.findall(r"[a-zA-Z0-9]+|[\u4e00-\u9fff]{2,}", normalized))
+        """抽取适合中文客服短问句的轻量检索词。
 
-        domain_terms = {
-            "理财产品a", "理财产品", "投资期限", "最低投资金额", "最低金额",
-            "收益率", "退款", "退款政策", "多久到账", "开户", "开户流程",
-            "身份证", "视频认证", "风险评估", "工单", "保证收益",
-        }
-        for term in domain_terms:
-            if term.lower() in normalized:
-                terms.add(term.lower())
+        抽取规则：
+        - ASCII 词（数字、英文）整词匹配
+        - 连续中文 2~4 字片段（n-gram）
+        避免基于业务词表硬编码，以免在评测集上过拟合。
+        """
+        normalized = query.lower()
+        terms: set[str] = set(re.findall(r"[a-zA-Z0-9]+|[\u4e00-\u9fff]{2,}", normalized))
 
         chinese_text = "".join(re.findall(r"[\u4e00-\u9fff]", normalized))
         for size in (2, 3, 4):
@@ -298,7 +301,7 @@ class LongTermMemory:
 
     @classmethod
     def _lexical_score(cls, query: str, content: str) -> float:
-        """计算查询和文档的关键词/字符片段相关性。"""
+        """计算查询和文档的关键词/字符片段相关性（覆盖率）。"""
         content_lower = content.lower()
         terms = cls._query_terms(query)
         if not terms:
@@ -309,12 +312,7 @@ class LongTermMemory:
             return 0.0
 
         coverage = len(hits) / len(terms)
-        exact_bonus = 0.0
-        for term in ("理财产品a", "投资期限", "最低投资金额", "退款", "开户流程"):
-            if term in query.lower() and term in content_lower:
-                exact_bonus += 0.2
-
-        return min(1.0, coverage + exact_bonus)
+        return min(1.0, coverage)
 
     def save(self):
         """持久化索引到磁盘"""
@@ -333,7 +331,11 @@ class LongTermMemory:
             await self._client.aclose()
 
     async def load_knowledge_base(self, kb_dir: str) -> int:
-        """从目录批量加载知识库文档（使用批量嵌入API）"""
+        """从目录批量加载知识库文档（使用批量嵌入API）
+
+        若磁盘上已存在与 KB 匹配的索引，则直接复用，避免每次启动重新嵌入。
+        复用判定：以当前 KB 计算的 chunk 数与索引 ntotal 一致即视为已加载。
+        """
         kb_path = Path(kb_dir)
         if not kb_path.exists():
             return 0
@@ -354,6 +356,13 @@ class LongTermMemory:
         if not all_chunks:
             return 0
 
+        if self._index is not None and self._index.ntotal == len(all_chunks):
+            logger.info(
+                "Skipping KB re-embedding; index already has %d vectors",
+                self._index.ntotal,
+            )
+            return 0
+
         batch_size = 64
         count = 0
         for i in range(0, len(all_chunks), batch_size):
@@ -361,44 +370,67 @@ class LongTermMemory:
             await self.add_documents_batch(batch)
             count += len(batch)
 
+        self.save()
         return count
 
     @staticmethod
     def _chunk_text(text: str, chunk_size: int = 512, overlap: int = 128) -> list[str]:
         """
         文本分块：固定长度 + 重叠窗口。
-        优先按段落分割，段落过长则按句子分割。
+
+        优先按段落分割；段落过长或与累积上下文合并后超出 ``chunk_size`` 时，
+        进一步按句号切分；单句仍超长则按硬窗口切分。最终保证每个 chunk 长度
+        不超过 ``chunk_size + overlap``，并保留 ``overlap`` 字符作为上下文。
         """
-        paragraphs = text.split("\n\n")
-        chunks = []
+        def _flush(buf: str, out: list[str]) -> None:
+            if buf.strip():
+                out.append(buf.strip())
+
+        def _split_long_paragraph(para: str, limit: int, overlap_size: int) -> list[str]:
+            """把超长段落切成不超 limit 的子串列表，相邻子串保留 overlap。"""
+            pieces: list[str] = []
+            step = max(1, limit - overlap_size)
+            for start in range(0, len(para), step):
+                piece = para[start:start + limit]
+                if piece.strip():
+                    pieces.append(piece)
+                if start + limit >= len(para):
+                    break
+            return pieces
+
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        if not paragraphs:
+            return [text[:chunk_size]] if text else []
+
+        chunks: list[str] = []
         current_chunk = ""
 
         for para in paragraphs:
-            para = para.strip()
-            if not para:
+            # 单段就超长 → 强制按硬窗口切分后再按句号合并
+            if len(para) > chunk_size:
+                _flush(current_chunk, chunks)
+                current_chunk = ""
+                pieces = _split_long_paragraph(para, chunk_size, overlap)
+                buffer = ""
+                for piece in pieces:
+                    if len(buffer) + len(piece) <= chunk_size:
+                        buffer += piece
+                    else:
+                        _flush(buffer, chunks)
+                        buffer = (
+                            buffer[-overlap:] if len(buffer) > overlap else ""
+                        ) + piece
+                _flush(buffer, chunks)
                 continue
 
             if len(current_chunk) + len(para) <= chunk_size:
                 current_chunk += para + "\n\n"
             else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                    overlap_text = current_chunk[-overlap:] if len(current_chunk) > overlap else current_chunk
-                    current_chunk = overlap_text + para + "\n\n"
-                else:
-                    sentences = para.replace("。", "。\n").replace(".", ".\n").split("\n")
-                    for sentence in sentences:
-                        sentence = sentence.strip()
-                        if not sentence:
-                            continue
-                        if len(current_chunk) + len(sentence) <= chunk_size:
-                            current_chunk += sentence
-                        else:
-                            if current_chunk:
-                                chunks.append(current_chunk.strip())
-                            current_chunk = sentence
+                _flush(current_chunk, chunks)
+                overlap_text = (
+                    current_chunk[-overlap:] if len(current_chunk) > overlap else current_chunk
+                )
+                current_chunk = overlap_text + para + "\n\n"
 
-        if current_chunk.strip():
-            chunks.append(current_chunk.strip())
-
-        return chunks if chunks else [text[:chunk_size]]
+        _flush(current_chunk, chunks)
+        return chunks

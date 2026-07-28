@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Annotated, Any, Literal, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -18,10 +17,10 @@ from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from app.agents.intent_router import IntentRouterAgent
 from app.agents.knowledge_rag import KnowledgeRAGAgent
 from app.agents.ticket_handler import TicketHandlerAgent
 from app.agents.compliance_checker import ComplianceCheckerAgent
+from app.config import get_settings
 from app.memory.working_memory import WorkingMemory
 from app.memory.short_term import ShortTermMemory
 from app.memory.long_term import LongTermMemory
@@ -54,7 +53,6 @@ SUPERVISOR_SYSTEM_PROMPT = """你是一个智能客服系统的Supervisor（主�
 3. 确保所有回复都经过合规审查
 
 可用的子Agent：
-- intent_router: 意图识别和分类
 - knowledge_rag: 知识库检索和回答
 - ticket_handler: 工单创建和查询
 - compliance_checker: 合规审查和敏感词检测
@@ -87,7 +85,7 @@ class SupervisorNode:
         session_id = state.get("session_id", "default")
 
         context = self.working_memory.get_context(session_id)
-        optimized_context = {}
+        optimized_context: dict = {}
         if self.short_term_memory is not None:
             optimized_context = await self.short_term_memory.get_optimized_context(
                 session_id,
@@ -116,7 +114,7 @@ class SupervisorNode:
         if intent not in valid_intents:
             intent = "knowledge_rag"
 
-        self.working_memory.update(
+        await self.working_memory.update(
             session_id,
             {
                 "last_intent": intent,
@@ -139,15 +137,22 @@ class SupervisorNode:
         """汇总子Agent结果，生成最终回复"""
         sub_results = state.get("sub_results", {})
         compliance_passed = state.get("compliance_passed", True)
+        compliance_meta = sub_results.get("compliance") if isinstance(sub_results, dict) else None
 
         if not compliance_passed:
+            risk_level = "high"
+            if isinstance(compliance_meta, dict):
+                risk_level = compliance_meta.get("risk_level", risk_level)
             final_response = (
-                "抱歉，您的请求涉及敏感内容，已转交人工客服处理。"
-                "工单编号已自动生成，请留意后续通知。"
+                "抱歉，您的请求涉及需要人工复核的内容（风险等级："
+                f"{risk_level}），已为您转交人工客服处理。"
+                "请您稍后留意客服的回复，或拨打客服热线获取进一步协助。"
             )
         else:
             result_parts = []
             for agent_name, result in sub_results.items():
+                if agent_name == "compliance":
+                    continue
                 if isinstance(result, str) and result.strip():
                     result_parts.append(result)
             final_response = "\n\n".join(result_parts) if result_parts else "抱歉，暂时无法处理您的请求，请稍后重试。"
@@ -172,11 +177,6 @@ def route_to_agent(state: AgentState) -> str:
     return route_map.get(intent, "knowledge_rag")
 
 
-def should_check_compliance(state: AgentState) -> str:
-    """所有回复都需经过合规审查"""
-    return "compliance_check"
-
-
 # ─── 构建Graph ───
 
 def create_supervisor_graph(
@@ -189,8 +189,7 @@ def create_supervisor_graph(
     """
     构建Supervisor编排的多Agent StateGraph。
 
-    这是整个系统的核心入口，将4个子Agent通过有向图连接起来，
-    由Supervisor节点负责路由决策和结果汇总。
+    将 3 个子 Agent 通过有向图连接起来，由 Supervisor 节点负责路由决策和结果汇总。
 
     Args:
         llm: 语言模型实例
@@ -198,18 +197,28 @@ def create_supervisor_graph(
         short_term_memory: 短期记忆
         long_term_memory: 长期记忆
         enable_checkpointing: 是否启用检查点（支持断点恢复）
+
+    Note:
+        默认禁用 ``enable_checkpointing``。LangGraph 的 ``MemorySaver`` 会
+        按 thread 无限累积状态，长期运行内存会单调增长；如需断点恢复，请
+        显式传入并自行实现驱逐策略。
     """
+    settings = get_settings()
+
     if llm is None:
         llm = ChatOpenAI(
-            model=os.getenv("MODEL_NAME", "gpt-4o"),
-            temperature=float(os.getenv("MODEL_TEMPERATURE", "0")),
+            model=settings.llm.model_name,
+            temperature=settings.llm.model_temperature,
+            api_key=settings.llm.openai_api_key or None,
+            base_url=settings.llm.openai_base_url,
         )
     if working_memory is None:
-        working_memory = WorkingMemory()
+        working_memory = WorkingMemory(
+            max_entries_per_session=settings.memory.working_memory_max_entries,
+        )
 
     supervisor = SupervisorNode(llm, working_memory, short_term_memory)
 
-    intent_router = IntentRouterAgent(llm)
     knowledge_agent = KnowledgeRAGAgent(llm, long_term_memory)
     ticket_agent = TicketHandlerAgent(llm)
     compliance_agent = ComplianceCheckerAgent(llm)

@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-import threading
+import asyncio
 import time
 from collections import defaultdict
 from datetime import datetime
@@ -27,12 +27,12 @@ class WorkingMemory:
         self._store: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self._context: dict[str, dict[str, Any]] = defaultdict(dict)
         self._last_activity: dict[str, float] = {}
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
         self._max_entries = max_entries_per_session
 
-    def update(self, session_id: str, data: dict[str, Any]) -> None:
+    async def update(self, session_id: str, data: dict[str, Any]) -> None:
         """更新工作记忆"""
-        with self._lock:
+        async with self._lock:
             entry = {
                 "timestamp": datetime.now().isoformat(),
                 "data": data,
@@ -47,20 +47,18 @@ class WorkingMemory:
 
     def get_context(self, session_id: str) -> dict[str, Any]:
         """获取当前session的完整上下文"""
-        with self._lock:
-            return dict(self._context.get(session_id, {}))
+        return dict(self._context.get(session_id, {}))
 
     def get_history(self, session_id: str, last_n: int = 10) -> list[dict]:
         """获取最近N条工作记忆记录"""
-        with self._lock:
-            entries = self._store.get(session_id, [])
-            return entries[-last_n:]
+        entries = self._store.get(session_id, [])
+        return entries[-last_n:]
 
     def clear(self, session_id: str) -> None:
         """清除指定session的工作记忆"""
-        with self._lock:
-            self._store.pop(session_id, None)
-            self._context.pop(session_id, None)
+        self._store.pop(session_id, None)
+        self._context.pop(session_id, None)
+        self._last_activity.pop(session_id, None)
 
     def export_for_persistence(self, session_id: str) -> dict[str, Any]:
         """导出工作记忆，用于持久化到短期/长期记忆"""
@@ -71,14 +69,14 @@ class WorkingMemory:
             "exported_at": datetime.now().isoformat(),
         }
 
-    def cleanup_expired(self, max_age_seconds: int = 1800) -> int:
+    async def cleanup_expired(self, max_age_seconds: int = 1800) -> int:
         """清理超过指定时间未活跃的session，返回清理数量"""
         now = time.time()
-        expired = []
-        with self._lock:
-            for sid, last_ts in self._last_activity.items():
-                if now - last_ts > max_age_seconds:
-                    expired.append(sid)
+        async with self._lock:
+            expired = [
+                sid for sid, last_ts in self._last_activity.items()
+                if now - last_ts > max_age_seconds
+            ]
             for sid in expired:
                 self._store.pop(sid, None)
                 self._context.pop(sid, None)

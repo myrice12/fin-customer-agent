@@ -6,41 +6,66 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator, Literal
 
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from langchain_core.messages import HumanMessage
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
+from app.agents.knowledge_rag import KnowledgeRAGAgent
 from app.agents.supervisor import create_supervisor_graph
-from app.memory.working_memory import WorkingMemory
-from app.memory.short_term import ShortTermMemory
-from app.memory.long_term import LongTermMemory
-from app.mcp.mcp_server import MCPToolServer, create_default_tools
-from app.tracing.otel_config import init_tracer, get_agent_metrics, shutdown_tracer
-from app.evaluation.rag_metrics import RAGEvalCase, evaluate_rag_case
+from app.config import get_settings
 from app.evaluation.business_metrics import run_business_evaluation
-from app.skills.registry import create_default_skill_registry
-from app.harness.middleware import setup_middleware
-from app.harness.auth import load_api_keys
+from app.evaluation.rag_metrics import RAGEvalCase, evaluate_rag_case
+from app.harness.auth import auth_enabled, verify_api_key
 from app.harness.health import comprehensive_health_check
+from app.harness.middleware import setup_middleware
+from app.mcp.mcp_server import MCPToolServer, create_default_tools
+from app.memory.long_term import LongTermMemory
+from app.memory.short_term import ShortTermMemory
+from app.memory.working_memory import WorkingMemory
+from app.skills.registry import create_default_skill_registry
+from app.tracing.otel_config import get_agent_metrics, init_tracer, shutdown_tracer
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
 
-working_memory = WorkingMemory()
-short_term_memory = ShortTermMemory(redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"))
-long_term_memory = LongTermMemory(index_path=os.getenv("FAISS_INDEX_PATH", "./vector_store/faiss_index"))
-mcp_server = create_default_tools(MCPToolServer())
-skill_registry = create_default_skill_registry()
-metrics = get_agent_metrics()
+def _build_components():
+    """根据配置中心构建全局组件实例。"""
+    settings = get_settings()
+
+    working_memory = WorkingMemory(
+        max_entries_per_session=settings.memory.working_memory_max_entries,
+    )
+    short_term_memory = ShortTermMemory(
+        redis_url=settings.memory.redis_url,
+        max_turns=settings.memory.short_term_max_turns,
+        ttl_seconds=settings.memory.short_term_ttl_seconds,
+    )
+    long_term_memory = LongTermMemory(
+        index_path=settings.memory.faiss_index_path,
+        embedding_dim=settings.embedding.embedding_dim,
+        embedding_api_base=settings.embedding.embedding_api_base,
+        embedding_api_key=settings.embedding.embedding_api_key,
+        embedding_model=settings.embedding.embedding_model_name,
+    )
+    mcp_server = create_default_tools(MCPToolServer())
+    skill_registry = create_default_skill_registry()
+    metrics = get_agent_metrics()
+    return working_memory, short_term_memory, long_term_memory, mcp_server, skill_registry, metrics
+
+
+components = _build_components()
+working_memory, short_term_memory, long_term_memory, mcp_server, skill_registry, metrics = components
 graph = None
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -49,37 +74,52 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     global graph
+    settings = get_settings()
 
     init_tracer(
-        service_name=os.getenv("OTEL_SERVICE_NAME", "fin-customer-agent"),
-        otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+        service_name=settings.tracing.otel_service_name,
+        otlp_endpoint=settings.tracing.otel_exporter_otlp_endpoint or None,
     )
 
+    llm = ChatOpenAI(
+        model=settings.llm.model_name,
+        temperature=settings.llm.model_temperature,
+        api_key=settings.llm.openai_api_key or None,
+        base_url=settings.llm.openai_base_url,
+    )
     graph = create_supervisor_graph(
+        llm=llm,
         working_memory=working_memory,
         short_term_memory=short_term_memory,
         long_term_memory=long_term_memory,
+        enable_checkpointing=False,
     )
 
     kb_count = await long_term_memory.load_knowledge_base("knowledge_base")
-    import logging
-    logging.getLogger(__name__).info("Knowledge base loaded: %d chunks", kb_count)
+    logger.info("Knowledge base loaded: %d new chunks", kb_count)
 
     async def _cleanup_loop():
         while True:
-            await asyncio.sleep(300)
-            wm_cleaned = working_memory.cleanup_expired(max_age_seconds=1800)
+            await asyncio.sleep(settings.memory.cleanup_interval_seconds)
+            wm_cleaned = await working_memory.cleanup_expired(
+                max_age_seconds=settings.memory.cleanup_max_age_seconds,
+            )
             stm_cleaned = await short_term_memory.cleanup_expired()
             if wm_cleaned or stm_cleaned:
-                import logging
-                logging.getLogger(__name__).info(
+                logger.info(
                     "Session cleanup: working=%d, short_term=%d",
                     wm_cleaned, stm_cleaned,
                 )
 
     cleanup_task = asyncio.create_task(_cleanup_loop())
 
-    load_api_keys()
+    if auth_enabled():
+        logger.info("API key authentication is ENABLED")
+    else:
+        logger.warning(
+            "API key authentication is DISABLED (API_KEYS not set) "
+            "— running in dev mode. DO NOT expose this instance publicly."
+        )
 
     yield
 
@@ -99,9 +139,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_origins = [o.strip() for o in get_settings().server.cors_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:8000").split(","),
+    allow_origins=_origins or ["http://localhost:8000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -141,17 +182,14 @@ async def root():
     return FileResponse(STATIC_DIR / "index.html")
 
 
-@app.post("/api/chat", response_model=ChatResponse)
+@app.post("/api/chat", response_model=ChatResponse, dependencies=[Depends(verify_api_key)])
 async def chat(request: ChatRequest):
     """主聊天接口"""
     if graph is None:
         raise HTTPException(status_code=503, detail="系统初始化中")
 
     session_id = request.session_id or str(uuid.uuid4())
-
     await short_term_memory.add_message(session_id, "user", request.message)
-
-    from langchain_core.messages import HumanMessage
 
     initial_state = {
         "messages": [HumanMessage(content=request.message)],
@@ -164,18 +202,17 @@ async def chat(request: ChatRequest):
         "current_agent": "",
         "retry_count": 0,
     }
-
     config = {"configurable": {"thread_id": session_id}}
 
     try:
-        result = await asyncio.wait_for(graph.ainvoke(initial_state, config=config), timeout=120.0)
+        result = await asyncio.wait_for(
+            graph.ainvoke(initial_state, config=config),
+            timeout=120.0,
+        )
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="请求处理超时，请稍后重试")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"处理失败: {str(e)}")
 
     final_response = result.get("final_response", "系统处理异常，请稍后重试")
-
     await short_term_memory.add_message(session_id, "assistant", final_response)
 
     return ChatResponse(
@@ -195,17 +232,14 @@ NODE_DISPLAY_NAMES = {
 }
 
 
-@app.post("/api/chat/stream")
+@app.post("/api/chat/stream", dependencies=[Depends(verify_api_key)])
 async def chat_stream(request: ChatRequest):
     """SSE流式聊天接口 — 逐节点推送处理进度"""
     if graph is None:
         raise HTTPException(status_code=503, detail="系统初始化中")
 
     session_id = request.session_id or str(uuid.uuid4())
-
     await short_term_memory.add_message(session_id, "user", request.message)
-
-    from langchain_core.messages import HumanMessage
 
     initial_state = {
         "messages": [HumanMessage(content=request.message)],
@@ -218,7 +252,6 @@ async def chat_stream(request: ChatRequest):
         "current_agent": "",
         "retry_count": 0,
     }
-
     config = {"configurable": {"thread_id": session_id}}
 
     async def event_generator() -> AsyncGenerator[str, None]:
@@ -237,7 +270,6 @@ async def chat_stream(request: ChatRequest):
             snapshot = await graph.aget_state(config)
             final_state = snapshot.values if snapshot else {}
             final_response = final_state.get("final_response", "系统处理异常，请稍后重试")
-
             await short_term_memory.add_message(session_id, "assistant", final_response)
 
             final_payload = {
@@ -248,7 +280,8 @@ async def chat_stream(request: ChatRequest):
             }
             yield f"event: final\ndata: {json.dumps(final_payload, ensure_ascii=False)}\n\n"
         except Exception as e:
-            error_payload = {"error": str(e)}
+            logger.exception("SSE chat stream failed: %s", e)
+            error_payload = {"error": "stream failed"}
             yield f"event: error\ndata: {json.dumps(error_payload, ensure_ascii=False)}\n\n"
         finally:
             yield "event: done\ndata: {}\n\n"
@@ -264,7 +297,7 @@ async def chat_stream(request: ChatRequest):
     )
 
 
-@app.get("/api/history/{session_id}")
+@app.get("/api/history/{session_id}", dependencies=[Depends(verify_api_key)])
 async def get_history(session_id: str):
     """获取对话历史"""
     history = await short_term_memory.get_history(session_id)
@@ -273,17 +306,17 @@ async def get_history(session_id: str):
 
 @app.get("/api/tools")
 async def list_tools():
-    """MCP工具发现接口"""
+    """MCP工具发现接口（只读元数据，保持公开）"""
     return {"tools": mcp_server.list_tools()}
 
 
 @app.get("/api/skills")
 async def list_skills(tag: str | None = None):
-    """Skill能力发现接口"""
+    """Skill能力发现接口（只读元数据，保持公开）"""
     return {"skills": skill_registry.list_skills(tag=tag)}
 
 
-@app.post("/api/tools/call")
+@app.post("/api/tools/call", dependencies=[Depends(verify_api_key)])
 async def call_tool(request: ToolCallRequest):
     """MCP工具调用接口"""
     result = await mcp_server.call_tool(
@@ -308,11 +341,9 @@ async def get_metrics():
     }
 
 
-@app.post("/api/evaluate/rag")
+@app.post("/api/evaluate/rag", dependencies=[Depends(verify_api_key)])
 async def evaluate_rag(request: RAGEvalRequest):
     """对单条RAG样本进行离线指标评测"""
-    from app.agents.knowledge_rag import KnowledgeRAGAgent
-
     if graph is None:
         raise HTTPException(status_code=503, detail="系统初始化中")
 
@@ -337,7 +368,7 @@ async def evaluate_rag(request: RAGEvalRequest):
     }
 
 
-@app.post("/api/evaluate/business")
+@app.post("/api/evaluate/business", dependencies=[Depends(verify_api_key)])
 async def evaluate_business_metrics(routing_mode: Literal["live", "skip"] = "live"):
     """离线业务指标评测：问答命中、人工耗时估算、路由、合规和上下文压缩。"""
     return await run_business_evaluation(kb_dir="knowledge_base", routing_mode=routing_mode)
@@ -361,10 +392,13 @@ async def session_stats():
     }
 
 
-@app.post("/api/sessions/cleanup")
+@app.post("/api/sessions/cleanup", dependencies=[Depends(verify_api_key)])
 async def session_cleanup():
     """手动触发过期会话清理"""
-    wm_cleaned = working_memory.cleanup_expired(max_age_seconds=1800)
+    settings = get_settings()
+    wm_cleaned = await working_memory.cleanup_expired(
+        max_age_seconds=settings.memory.cleanup_max_age_seconds,
+    )
     stm_cleaned = await short_term_memory.cleanup_expired()
     return {
         "working_memory_cleaned": wm_cleaned,
@@ -374,9 +408,11 @@ async def session_cleanup():
 
 if __name__ == "__main__":
     import uvicorn
+
+    settings = get_settings()
     uvicorn.run(
         "app.main:app",
-        host=os.getenv("HOST", "0.0.0.0"),
-        port=int(os.getenv("PORT", "8000")),
-        reload=True,
+        host=settings.server.host,
+        port=settings.server.port,
+        reload=os.getenv("APP_RELOAD", "false").lower() in ("1", "true", "yes"),
     )

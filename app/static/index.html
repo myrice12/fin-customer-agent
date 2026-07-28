@@ -1,75 +1,161 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Financial Customer Service Agent</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b1020" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#5b6cff" media="(prefers-color-scheme: light)" />
+    <meta name="description" content="基于 LangGraph Supervisor 编排的金融领域智能客服多 Agent 系统" />
+    <title>Fin Customer Agent · 金融智能客服</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%235d7bff'/><stop offset='1' stop-color='%237a4dff'/></linearGradient></defs><rect width='64' height='64' rx='16' fill='url(%23g)'/><path d='M20 38c0-7 6-12 12-12 5 0 9 3 11 7l-5 3c-1-2-3-4-6-4-4 0-6 3-6 6s2 6 6 6c3 0 5-2 6-4l5 3c-2 4-6 7-11 7-6 0-12-5-12-12z' fill='white'/></svg>" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap"
-      rel="stylesheet"
-    />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Manrope:wght@600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <main class="shell">
-      <aside class="sidebar" aria-label="导航">
-        <div class="brand reveal">
-          <div class="brand-mark">FA</div>
-          <div>
-            <p class="eyebrow">Financial Service Desk</p>
-            <h1>Customer Service Agent</h1>
-          </div>
-        </div>
+    <div class="bg-aurora" aria-hidden="true">
+      <span class="orb orb-a"></span>
+      <span class="orb orb-b"></span>
+      <span class="orb orb-c"></span>
+      <span class="grid-overlay"></span>
+    </div>
 
-        <section class="sidebar-panel reveal delay-1">
-          <div class="section-head">
-            <span>Quick prompts</span>
+    <div class="app">
+      <aside class="sidebar" aria-label="导航">
+        <header class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" width="22" height="22"><path d="M9 19c0-3.5 3-6 6-6 2.5 0 4.7 1.5 5.7 3.6l-2.5 1.5c-.5-1.1-1.6-1.9-3.2-1.9-2 0-3.2 1.4-3.2 2.8s1.2 2.8 3.2 2.8c1.6 0 2.7-.8 3.2-1.9l2.5 1.5c-1 2.1-3.2 3.6-5.7 3.6-3 0-6-2.5-6-6z" fill="white"/></svg>
           </div>
-          <div class="prompt-list">
-            <button type="button" class="prompt-chip" data-prompt="退款政策是什么？">退款政策</button>
-            <button type="button" class="prompt-chip" data-prompt="理财产品A的收益率是多少？">产品咨询</button>
-            <button type="button" class="prompt-chip" data-prompt="我想创建一个退款工单">创建工单</button>
-            <button type="button" class="prompt-chip" data-prompt="开户流程需要准备什么？">开户流程</button>
+          <div class="brand-info">
+            <span class="brand-eyebrow">Financial Service Desk</span>
+            <h1>Fin Customer Agent</h1>
+          </div>
+        </header>
+
+        <button type="button" class="new-chat-btn" id="newChatBtn" aria-label="新建对话">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          <span>新建对话</span>
+        </button>
+
+        <section class="panel sessions-panel" aria-label="历史会话">
+          <header class="panel-head">
+            <span>历史会话</span>
+            <span class="counter" id="sessionCount">0</span>
+          </header>
+          <ul class="session-list" id="sessionList" role="list"></ul>
+          <p class="session-empty" id="sessionEmpty">暂无历史会话</p>
+        </section>
+
+        <section class="panel" aria-label="快速提问">
+          <header class="panel-head">
+            <span>快速提问</span>
+          </header>
+          <div class="prompt-grid">
+            <button type="button" class="prompt-chip" data-prompt="退款政策是什么？">
+              <span class="chip-dot" style="--c:#5d7bff"></span>退款政策
+            </button>
+            <button type="button" class="prompt-chip" data-prompt="理财产品A的收益率是多少？">
+              <span class="chip-dot" style="--c:#13a57b"></span>产品咨询
+            </button>
+            <button type="button" class="prompt-chip" data-prompt="我想创建一个退款工单">
+              <span class="chip-dot" style="--c:#f0a755"></span>创建工单
+            </button>
+            <button type="button" class="prompt-chip" data-prompt="开户流程需要准备什么？">
+              <span class="chip-dot" style="--c:#a26bff"></span>开户流程
+            </button>
+            <button type="button" class="prompt-chip" data-prompt="保证收益吗？">
+              <span class="chip-dot" style="--c:#bf4d57"></span>合规问询
+            </button>
+            <button type="button" class="prompt-chip" data-prompt="如何申请理赔？">
+              <span class="chip-dot" style="--c:#0bb5d6"></span>理赔咨询
+            </button>
           </div>
         </section>
+
+        <footer class="sidebar-footer">
+          <button type="button" class="ghost-btn" id="themeToggle" aria-label="切换主题">
+            <svg class="icon-sun" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+            <svg class="icon-moon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+            <span class="theme-label">深色模式</span>
+          </button>
+          <a class="ghost-btn" href="/docs" target="_blank" rel="noopener">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg>
+            <span>API 文档</span>
+          </a>
+        </footer>
       </aside>
 
-      <section class="workspace" aria-label="对话工作区">
-        <section class="conversation reveal">
-          <div class="conversation-head">
-            <h3>金融客服对话台</h3>
-            <div class="head-status">
-              <span class="status-chip" id="complianceBadge">Idle</span>
-              <span class="status-chip muted" id="latencyText">--</span>
+      <main class="workspace" aria-label="对话工作区">
+        <header class="topbar">
+          <div class="topbar-info">
+            <span class="status-chip" id="connectionStatus">
+              <span class="dot online"></span>
+              <span>已连接</span>
+            </span>
+            <span class="topbar-meta">
+              会话 <code id="sessionIdText">未创建</code>
+            </span>
+          </div>
+          <div class="topbar-actions">
+            <span class="meta-chip" id="modelChip">gpt-4o-mini</span>
+            <span class="meta-chip muted" id="latencyText">--</span>
+          </div>
+        </header>
+
+        <section class="chat-log" id="chatLog" aria-live="polite">
+          <div class="empty-state" id="emptyState">
+            <div class="empty-illustration" aria-hidden="true">
+              <svg viewBox="0 0 96 96" width="80" height="80"><defs><linearGradient id="hg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5d7bff"/><stop offset="1" stop-color="#a26bff"/></linearGradient></defs><circle cx="48" cy="48" r="46" fill="url(#hg)" opacity=".12"/><circle cx="48" cy="48" r="32" fill="url(#hg)" opacity=".22"/><path d="M28 50c0-9 8-16 18-16 7 0 13 4 16 10l-7 4c-2-3-5-5-9-5-6 0-10 4-10 7s4 7 10 7c4 0 7-2 9-5l7 4c-3 6-9 10-16 10-10 0-18-7-18-16z" fill="url(#hg)"/></svg>
+            </div>
+            <h2>您好，我是您的金融智能助手</h2>
+            <p>我能处理<strong>产品咨询</strong>、<strong>退款/理赔工单</strong>、<strong>开户问答</strong>，并在每次回复前自动执行合规审查。请从左侧选择快捷提问，或在下方输入您的需求。</p>
+            <div class="empty-features">
+              <article class="feature">
+                <span class="feature-icon" style="background:rgba(93,123,255,.12);color:#5d7bff">🛡️</span>
+                <h3>合规审查</h3>
+                <p>规则引擎 + LLM 双重审查，PII 自动脱敏。</p>
+              </article>
+              <article class="feature">
+                <span class="feature-icon" style="background:rgba(19,165,123,.12);color:#13a57b">📚</span>
+                <h3>RAG 知识库</h3>
+                <p>基于 Qwen Embedding 的语义检索 + 重排序。</p>
+              </article>
+              <article class="feature">
+                <span class="feature-icon" style="background:rgba(240,167,85,.14);color:#d2892a">🎫</span>
+                <h3>工单办理</h3>
+                <p>退款、理赔、开户一站式在线处理。</p>
+              </article>
+              <article class="feature">
+                <span class="feature-icon" style="background:rgba(162,107,255,.14);color:#a26bff">🔍</span>
+                <h3>透明溯源</h3>
+                <p>SSE 实时推送每个 Agent 节点的执行进度。</p>
+              </article>
             </div>
           </div>
+        </section>
 
-          <div class="chat-log" id="chatLog" aria-live="polite">
-            <article class="message assistant">
-              <div class="message-mark">AG</div>
-              <div class="message-body">
-                <p>你好，我可以处理退款、产品咨询、开户问答和工单请求。直接输入问题即可。</p>
-              </div>
-            </article>
-          </div>
-
-          <form class="composer" id="chatForm">
-            <label class="sr-only" for="messageInput">输入消息</label>
+        <form class="composer" id="chatForm" autocomplete="off">
+          <div class="composer-shell">
             <textarea
               id="messageInput"
               rows="1"
-              placeholder="输入客户问题，例如：退款政策是什么？"
+              placeholder="输入客户问题，例如：理财产品A的收益率是多少？"
+              aria-label="输入消息"
             ></textarea>
             <button type="submit" id="sendButton" aria-label="发送消息">
-              <span>Send</span>
+              <svg class="send-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+              <svg class="loading-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.55"/></svg>
             </button>
-          </form>
-        </section>
-      </section>
-    </main>
+          </div>
+          <div class="composer-hint">
+            <span><kbd>Enter</kbd> 发送 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行</span>
+            <span class="composer-status" id="composerStatus">就绪</span>
+          </div>
+        </form>
+      </main>
+    </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js" defer></script>
   </body>
 </html>

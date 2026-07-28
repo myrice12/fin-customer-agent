@@ -28,9 +28,22 @@ def setup_middleware(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def global_exception_handler(request: Request, exc: Exception):
-        """全局异常处理：返回统一格式，不暴露内部细节"""
-        logger.error("Unhandled exception on %s %s: %s", request.method, request.url.path, exc, exc_info=True)
+        """全局异常处理：返回统一格式，不向客户端泄露内部细节。
+
+        完整异常（含堆栈）仅记录到服务端日志；客户端只看到
+        ``error`` 与 ``request_id``，便于排查但避免泄露内部信息。
+        """
+        request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        logger.error(
+            "Unhandled exception on %s %s (request_id=%s): %s",
+            request.method, request.url.path, request_id, exc,
+            exc_info=True,
+        )
         return JSONResponse(
             status_code=500,
-            content={"error": "Internal server error", "detail": str(exc)},
+            content={
+                "error": "Internal server error",
+                "request_id": request_id,
+            },
+            headers={"X-Request-ID": request_id},
         )

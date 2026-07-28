@@ -37,9 +37,9 @@ class ComplianceResult:
 
 
 SENSITIVE_PATTERNS = {
-    "phone": r"1[3-9]\d{9}",
-    "id_card": r"\d{17}[\dXx]",
-    "bank_card": r"\b\d{16,19}\b",
+    "phone": r"(?<!\d)1[3-9]\d{9}(?!\d)",
+    "id_card": r"(?<!\d)\d{17}[\dXx](?!\d)",
+    "bank_card": r"(?<!\d)\d{16,19}(?!\d)",
     "email": r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
     "verification_code": r"(验证码|校验码|动态码)[^\d]{0,8}\d{4,8}",
 }
@@ -328,9 +328,9 @@ class ComplianceCheckerAgent:
 
         sanitized_results = dict(sub_results)
         if not compliance_result.passed:
-            for key in sanitized_results:
-                if isinstance(sanitized_results[key], str):
-                    sanitized_results[key] = compliance_result.sanitized_content
+            for key, value in list(sanitized_results.items()):
+                if isinstance(value, str) and value.strip():
+                    sanitized_results[key] = self._mask_pii(value)
 
         return {
             **state,
